@@ -31,8 +31,11 @@ import qualified Data.Map as M
 import Data.Monoid
 import Data.String
 import qualified Data.Text as T
+import qualified Data.Traversable as T
 import System.Log.Logger
 import System.ZMQ4
+import Control.Error.Util
+import Data.Maybe
 
 import Synchronise.Configuration
 import Synchronise.DataSource (runDSMonad)
@@ -102,8 +105,8 @@ spawnServer cfg n = do
 
     allDataSources :: Configuration -> [DataSource]
     allDataSources Configuration{..}
-      = let entities =      M.elems   configEntities
-        in  concat   $ fmap M.elems $ map entitySources entities
+      = let entities = M.elems     configEntities
+        in  concat   $ M.elems <$> map entitySources entities
 
 
 --------------------------------------------------------------------------------
@@ -301,7 +304,7 @@ processNotification store datasources cfg fk@(ForeignKey{..}) = do
         (Nothing, Left  e) -> notifyProblem (SynchroniseUnknown $ show e)
         (Nothing, Right d) -> notifyCreate  store dss fk d
         (Just i,  Left  _) -> notifyDelete  store dss i
-        (Just i,  Right d) -> notifyUpdate  store dss i
+        (Just i,  Right d) -> notifyUpdate  store dss i  d
 
 -- | Creates a new internal document to reflect a new foreign change. Update
 --   all given data sources of the change.
@@ -371,9 +374,28 @@ notifyUpdate
   :: Store store => store
   -> [DataSource]
   -> InternalKey
+  -> Document
   -> IO ()
-notifyUpdate store datasources ik =
+notifyUpdate store datasources ik doc = do
   infoM logName $ "UPDATE: " <> show ik
+
+  -- Fetch documents
+  (fails, valids) <-  L.partition isNothing <$> mapM getDoc datasources
+  unless (null fails)
+    $ warningM logName
+    $ "UPDATE: missing documents for " <> show ik <> ". Errors: " <> show fails
+
+  -- Find or calculate the initial document.
+  -- TODO: This is fragile in the case that only one data sources has a document. (thsutton)
+  init <-  fromMaybe (calculateInitialDocument valids)
+       <$> lookupInitialDocument store ik
+
+  undefined
+
+  where -- Gets the document, if any exists for this internal key.
+        getDoc ds
+          =   lookupForeignKey store (sourceName ds) ik
+          >>= fmap join . T.sequenceA . fmap (fmap hush . DS.runDSMonad . DS.readDocument ds)
 
 -- | Logs a problem with the notification.
 --
