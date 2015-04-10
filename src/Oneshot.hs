@@ -94,7 +94,7 @@ run :: Request -> Configuration -> IO ()
 run req conf
   =   either (error . show) id
   <$> runSynchroniseMonad
-      (SynchroniseMonadState conf)
+      (SynchroniseEnv conf)
       (synchroniseOnce req conf)
 
 main :: IO ()

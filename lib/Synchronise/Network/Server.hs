@@ -9,43 +9,43 @@
 
 module Synchronise.Network.Server where
 
-import Control.Applicative
-import Control.Concurrent
-import Control.Concurrent.Async
-import Control.Error.Util ()
-import qualified Control.Exception as E
-import Control.Lens hiding (Context, coerce)
-import Control.Monad.Catch
-import Control.Monad.Error.Class
-import Control.Monad.Reader
-import Control.Monad.Trans.Except
-import Data.Binary
-import qualified Data.ByteString as BS hiding (unpack)
-import qualified Data.ByteString.Char8 as BS (unpack)
-import Data.ByteString.Lazy (fromStrict, toStrict)
-import qualified Data.ByteString.Lazy as LBS
-import Data.Coerce
-import Data.Either
-import qualified Data.List as L
-import Data.List.NonEmpty hiding (filter, length, map)
-import qualified Data.Map as M
-import Data.Monoid
-import Data.String
-import qualified Data.Text as T
-import Data.Traversable ()
-import System.Log.Logger
-import System.ZMQ4
+import           Control.Applicative
+import           Control.Concurrent
+import           Control.Concurrent.Async
+import           Control.Error.Util           ()
+import qualified Control.Exception            as E
+import           Control.Lens                 hiding (Context, coerce)
+import           Control.Monad.Catch
+import           Control.Monad.Error.Class
+import           Control.Monad.Reader
+import           Control.Monad.Trans.Except
+import           Data.Binary
+import qualified Data.ByteString              as BS hiding (unpack)
+import qualified Data.ByteString.Char8        as BS (unpack)
+import           Data.ByteString.Lazy         (fromStrict, toStrict)
+import qualified Data.ByteString.Lazy         as LBS
+import           Data.Coerce
+import           Data.Either
+import qualified Data.List                    as L
+import           Data.List.NonEmpty           hiding (filter, length, map)
+import qualified Data.Map                     as M
+import           Data.Monoid
+import           Data.String
+import qualified Data.Text                    as T
+import           Data.Traversable             ()
+import           System.Log.Logger
+import           System.ZMQ4
 
-import Synchronise.Configuration
-import Synchronise.DataSource (runDSMonad)
-import qualified Synchronise.DataSource as DS
-import Synchronise.Diff
-import Synchronise.Document
-import Synchronise.Identifier
-import Synchronise.Monad
-import Synchronise.Network.Protocol
-import Synchronise.Store
-import Synchronise.Store.PostgreSQL
+import           Synchronise.Configuration
+import           Synchronise.DataSource       (runDSMonad)
+import qualified Synchronise.DataSource       as DS
+import           Synchronise.Diff
+import           Synchronise.Document
+import           Synchronise.Identifier
+import           Synchronise.Monad
+import           Synchronise.Network.Protocol
+import           Synchronise.Store
+import           Synchronise.Store.PostgreSQL
 
 
 
@@ -56,11 +56,10 @@ type ErrorMsg = String
 -- * Server
 
 data ServerState = ServerState
-    { _serverContext     :: Context       -- ^ ZMQ context
-    , _serverSocket      :: Socket Rep    -- ^ ZMQ socket
-    , _serverConfig      :: Configuration -- ^ synchronised config
-    , _serverStore       :: PGStore       -- ^ Internal data store, shared between all server threads
-    , _serverDataSources :: [DataSource]  -- ^ "Memoised" eunmeration of data sources from conf
+    { _serverContext :: Context       -- ^ ZMQ context
+    , _serverSocket  :: Socket Rep    -- ^ ZMQ socket
+    , _serverConfig  :: Configuration -- ^ synchronised config
+    , _serverStore   :: PGStore       -- ^ Internal data store, shared between all server threads
     }
 makeLenses ''ServerState
 
@@ -86,11 +85,11 @@ spawnServer cfg n = do
     noticeM logName "Finished server"
   where
     spawnServerAPI :: ServerState -> IO (Async ())
-    spawnServerAPI           = async . flip runProtocol protocol
+    spawnServerAPI = async . flip runProtocol protocol
 
     spawnServerWorkers :: ServerState -> IO [Async ()]
     spawnServerWorkers state
-      = replicateM n (async $ worker (_serverStore state) (_serverDataSources state) cfg)
+      = replicateM n (async $ worker (_serverStore state) cfg)
 
     start :: IO ServerState
     start = do
@@ -99,18 +98,12 @@ spawnServer cfg n = do
         sock   <- socket ctx Rep
         bind sock zmq_conn
         db     <- initBackend (PGOpts pg_conn)
-        return $  ServerState ctx sock cfg db (allDataSources cfg)
+        return $  ServerState ctx sock cfg db
 
     stop :: ServerState -> IO ()
     stop state = do
         close $ state ^. serverSocket
         term  $ state ^. serverContext
-
-    allDataSources :: Configuration -> [DataSource]
-    allDataSources Configuration{..}
-      = let entities = M.elems     configEntities
-        in  concat   $ M.elems <$> map entitySources entities
-
 
 --------------------------------------------------------------------------------
 
@@ -266,8 +259,8 @@ getWorkBackoff store = do
 -- | A worker for the synchronised server.
 --   These workers cannot die, they simply log any errors and keep going.
 --
-worker :: Store store => store -> [DataSource] -> Configuration -> IO ()
-worker store datasources cfg = go
+worker :: Store store => store -> Configuration -> IO ()
+worker store cfg = go
   where -- Get a work item from the queue, mark it as busy and try to complete it.
         -- If all goes well, mark the work as finished when done, otherwise signal
         -- it as free.
@@ -281,7 +274,7 @@ worker store datasources cfg = go
           case item of
             WorkNotify fk -> do
               liftIO . debugM logName $ "Processing a notifcation: " <> show fk
-              processNotification store datasources cfg fk
+              processNotification store cfg fk
             WorkApplyPatch did a_diff -> do
               liftIO . debugM logName $ "Processing a diff: " <> show did
               processDiff did a_diff
@@ -290,24 +283,25 @@ worker store datasources cfg = go
 
 -- notifications
 
-processNotification :: Store store => store -> [DataSource] -> Configuration -> ForeignKey -> IO ()
-processNotification store datasources cfg fk@(ForeignKey{..}) = do
-  let ds = do es <- M.lookup fkEntity (configEntities cfg)
-              M.lookup fkSource (entitySources es)
-  case ds of
-    Nothing         -> liftIO . criticalM logName $ "Unknown key in workqueue: " <> show fk
-    Just datasource -> do
+processNotification :: Store store => store -> Configuration -> ForeignKey -> IO ()
+processNotification store cfg fk@(ForeignKey{..}) = do
+  let x = do e <- M.lookup fkEntity (configEntities cfg)
+             d <- M.lookup fkSource (entitySources e)
+             return (e, d)
+  case x of
+    Nothing -> liftIO . criticalM logName $ "Unknown key in workqueue: " <> show fk
+    Just (entity, source) -> do
       ik    <- liftIO     $ lookupInternalKey store fk
-      doc   <- runDSMonad $ DS.readDocument datasource fk
+      doc   <- runDSMonad $ DS.readDocument source fk
 
-      -- Update data sources other than the one from which the notification originated.
-      let dss = L.delete datasource datasources
+      let allSources = M.elems (entitySources entity)
+          sources    = L.delete source allSources
 
       liftIO $ case (ik, doc) of
         (Nothing, Left  e) -> notifyProblem (SynchroniseUnknown $ show e)
-        (Nothing, Right d) -> notifyCreate  store dss fk d
-        (Just i,  Left  _) -> notifyDelete  store dss i
-        (Just i,  Right _) -> notifyUpdate  store dss i
+        (Nothing, Right d) -> notifyCreate  store sources fk d
+        (Just i,  Left  _) -> notifyDelete  store sources i
+        (Just i,  Right _) -> notifyUpdate  store allSources i
 
 -- | Creates a new internal document to reflect a new foreign change. Update
 --   all given data sources of the change.
@@ -315,13 +309,8 @@ processNotification store datasources cfg fk@(ForeignKey{..}) = do
 --   Caller is responsible for: ensuring the datasources exclude the one from
 --   which the event originates.
 --
-notifyCreate
-  :: Store store => store
-  -> [DataSource] -- ^ Create in each of these data sources.
-  -> ForeignKey   -- ^ Using this foreign key.
-  -> Document     -- ^ And this document.
-  -> IO ()
-notifyCreate store datasources fk@(ForeignKey{..}) doc = do
+notifyCreate :: Store store => store -> [DataSource] -> ForeignKey -> Document -> IO ()
+notifyCreate store datasources fk@(ForeignKey{..}) doc@(Document{..}) = do
   infoM logName $ "CREATE: " <> show fk
 
   -- Create an internal key associated with the new document
@@ -331,13 +320,19 @@ notifyCreate store datasources fk@(ForeignKey{..}) doc = do
   -- Create an initial document
   recordInitialDocument store ik doc
 
-  -- Update the document for all known entities
-  forM_ datasources updateDoc
+  -- Update other sources in the entity
+  forM_ datasources (createDoc ik)
 
-  where updateDoc ds = do
-          x  <- runDSMonad $ DS.updateDocument ds fk doc
-          case x of Left  e -> errorM logName (show e)
-                    Right _ -> return ()
+  where createDoc ik ds = do
+          x <- runDSMonad
+             $ DS.createDocument ds
+             $ graftDoc doc ds
+          case x of
+            Left  e -> errorM logName ("notifyCreate: " <> show e)
+            Right f -> recordForeignKey store ik f
+
+        graftDoc Document{..} DataSource{..}
+          = Document sourceEntity sourceName _documentContent
 
 -- | Deletes internal document to reflect the foreign change. Update
 --   all given data sources of the change.
@@ -370,9 +365,6 @@ notifyDelete store datasources ik = do
 -- | Updates internal document to reflect the foreign change. Update
 --   all given data sources of the change.
 --
---   Caller is responsible for: ensuring the datasources exclude the one from
---   which the event originates.
---
 notifyUpdate
   :: Store store => store
   -> [DataSource]
@@ -392,10 +384,9 @@ notifyUpdate store datasources ik = do
   -- Extract and merge patches.
   let (merged, rejects) = merge policy $ map (diff policy initial) valid
 
-  if null rejects
-    then debugM logName $ "No rejected changes processing " <> show ik
-    else infoM logName $ "Rejected " <> show (length rejects) <> " changes in "
-      <> show ik
+  if   null rejects
+  then debugM logName $ "No rejected changes processing " <> show ik
+  else infoM  logName $ "Rejected " <> show (length rejects) <> " changes in " <> show ik
 
   -- Record changes in history.
   did <- recordDiffs store ik (merged, rejects)
@@ -409,9 +400,8 @@ notifyUpdate store datasources ik = do
   let initial' = patch policy merged initial
   recordInitialDocument store ik initial'
 
-  return ()
   where
-    policy = ignoreConflicts
+    policy = acceptAll
     calculate :: [Document] -> IO Document
     calculate docs = do
       infoM logName $ "No initial document for " <> show ik <> "."
@@ -421,7 +411,7 @@ notifyUpdate store datasources ik = do
 -- | Logs a problem with the notification.
 --
 notifyProblem :: SynchroniseError -> IO ()
-notifyProblem = errorM logName . show
+notifyProblem = errorM logName . (<>) "notifyProblem: " . show
 
 -- diffs
 

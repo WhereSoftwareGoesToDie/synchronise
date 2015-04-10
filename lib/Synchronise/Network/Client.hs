@@ -15,7 +15,17 @@
 {-# LANGUAGE ScopedTypeVariables        #-}
 
 module Synchronise.Network.Client
-where
+  ( -- * Interface
+    getConflicted
+  , enqueueResolvePatch
+  , enqueueChangeNotification
+
+    -- * Running
+  , runSynchroniseZMQ
+
+    -- * Utils
+  , mkChangeNotification
+  ) where
 
 import Control.Applicative
 import Control.Monad.Except
@@ -25,9 +35,11 @@ import Data.ByteString.Lazy (fromStrict)
 import Data.List.NonEmpty
 import System.ZMQ4.Monadic
 
+import Synchronise.Identifier
 import Synchronise.Network.Protocol
 import Synchronise.Network.Server
 import Synchronise.Store hiding (ops)
+
 
 -- | Retrieve all documents that are currently marked as being conflicted
 getConflicted
@@ -53,6 +65,13 @@ enqueueChangeNotification
     -> m ()
 enqueueChangeNotification notification =
     void $ performRequest HeaderChange (RequestChange notification)
+
+--------------------------------------------------------------------------------
+
+mkChangeNotification :: ForeignKey -> ChangeNotification
+mkChangeNotification k = ChangeNotification (fkEntity k) (fkSource k) (fkID k)
+
+--------------------------------------------------------------------------------
 
 newtype SynchroniseClientZMQ z a =
     SynchroniseClientZMQ {
@@ -98,8 +117,9 @@ runSynchroniseZMQ
 runSynchroniseZMQ target action = runZMQ $ do
         soc <- socket Req
         connect soc target
-        let action' = runExceptT $ unSynchroniseClientZMQ action
-        x <- runReaderT action' soc
+        x <- flip runReaderT soc
+           $ runExceptT
+           $ unSynchroniseClientZMQ action
         disconnect soc target
         close soc
         return x

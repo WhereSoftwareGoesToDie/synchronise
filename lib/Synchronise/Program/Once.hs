@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns #-}
+
 --
 -- Copyright © 2014-2015 Anchor Systems, Pty Ltd and Others
 --
@@ -7,9 +9,18 @@
 -- the 3-clause BSD licence.
 --
 
--- | Description: Run /Synchronise/ as a one-short command.
-module Synchronise.Program.Once where
+-- | Description: Run /Synchronise/ as a one-shot command.
+--
+module Synchronise.Program.Once
+  ( -- * One-shot `synchronise` on documents
+    Request(..)
+  , synchroniseOnce
 
+    -- * Run store commands
+  , runPSQL
+  ) where
+
+import Control.Exception
 import Control.Monad.IO.Class
 import Data.Aeson
 
@@ -17,9 +28,15 @@ import Synchronise.Configuration
 import Synchronise.DataSource
 import Synchronise.Document
 import Synchronise.Identifier
+import Synchronise.Store
+import Synchronise.Store.PostgreSQL
 import Synchronise.Monad
 
--- | A request to be processed.
+
+--------------------------------------------------------------------------------
+
+-- * Operations on documents
+
 data Request
     = Create { commandKey :: ForeignKey }
     | Read   { commandKey :: ForeignKey }
@@ -27,7 +44,8 @@ data Request
     | Delete { commandKey :: ForeignKey }
   deriving (Eq, Show)
 
--- | Run a single command.
+-- | Run a single command on documents.
+--
 synchroniseOnce
     :: Request
     -> Configuration
@@ -58,3 +76,14 @@ inputDocument fk =
     let e = fkEntity fk
         s = fkSource fk
     in return $ Document e s Null
+
+
+--------------------------------------------------------------------------------
+
+-- * Low-level operations on a persistent store.
+
+runPSQL :: (PGStore -> IO a) -> Configuration -> IO a
+runPSQL act (configServer -> (_,_,pg_conn))
+  = bracket (initBackend (PGOpts pg_conn))
+            (closeBackend)
+            act
